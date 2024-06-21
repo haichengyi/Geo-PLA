@@ -47,9 +47,6 @@ def exp(field):
         return {field: torch.exp((edges.data[field].sum(-1, keepdim=True)).clamp(-5, 5))}
     return func
 
-
-
-
 """
     Single Attention Head
 """
@@ -60,6 +57,7 @@ class MultiHeadAttentionLayer(nn.Module):
         
         self.out_dim = out_dim
         self.num_heads = num_heads
+        self.num_samples = 10
         
         if use_bias:
             self.Q = nn.Linear(in_dim, out_dim * num_heads, bias=True)
@@ -71,27 +69,37 @@ class MultiHeadAttentionLayer(nn.Module):
             self.K = nn.Linear(in_dim, out_dim * num_heads, bias=False)
             self.V = nn.Linear(in_dim, out_dim * num_heads, bias=False)
             self.proj_e = nn.Linear(in_dim, out_dim * num_heads, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """
+        Initialize parameters of projection matrices, the same settings as in
+        the original implementation of the paper.
+        """
+        nn.init.xavier_uniform_(self.Q.weight, gain=2**-0.5)
+        nn.init.xavier_uniform_(self.K.weight, gain=2**-0.5)
+        nn.init.xavier_uniform_(self.V.weight, gain=2**-0.5)
+
+        nn.init.xavier_uniform_(self.proj_e.weight)
+        if self.proj_e.bias is not None:
+            nn.init.constant_(self.proj_e.bias, 0.0)
     
     def propagate_attention(self, g):
         # Compute attention score
-        g.apply_edges(src_dot_dst('K_h', 'Q_h', 'score')) #, edges)
-        # 计算了每个边的注意力分数，并将结果存储在名为score的边特征中。
+        g.apply_edges(src_dot_dst('K_h', 'Q_h', 'score')) 
         # scaling attention score
-        g.apply_edges(scaling('score', np.sqrt(self.out_dim)))
+        g.apply_edges(scaling('score', np.sqrt(self.out_dim))) # 8
         
         # Use available edge features to modify the scores
         g.apply_edges(imp_exp_attn('score', 'proj_e'))
         
-        # Copy edge features as e_out to be passed to FFN_e
-        g.apply_edges(out_edge_features('score'))
+        g.apply_edges(out_edge_features('score'))  
         
-        # softmax 对修正后的注意力分数进行softmax
         g.apply_edges(exp('score'))
 
-        # print(g.edata['score'])
 
         # Send weighted values to target nodes
-        eids = g.edges()
+        eids = g.edges()  
         g.send_and_recv(eids, fn.u_mul_e('V_h', 'score', 'V_h'), fn.sum('V_h', 'wV'))
         g.send_and_recv(eids, fn.copy_e('score', 'score'), fn.sum('score', 'z'))
     
@@ -112,6 +120,7 @@ class MultiHeadAttentionLayer(nn.Module):
         self.propagate_attention(g)
         
         h_out = g.ndata['wV'] / (g.ndata['z'] + torch.full_like(g.ndata['z'], 1e-6)) # adding eps to all values here
+        # 节点特征的归一化操作
         e_out = g.edata['e_out']
         
         return h_out, e_out
@@ -121,7 +130,7 @@ class GraphTransformerLayer(nn.Module):
     """
         Param: 
     """
-    def __init__(self, in_dim, out_dim, num_heads, dropout=0.0, layer_norm=False, batch_norm=True, residual=True, use_bias=False):
+    def __init__(self, in_dim, out_dim, num_heads, dropout=0.0, layer_norm=False, batch_norm=True, residual=True, use_bias=True):
         super().__init__()
 
         self.in_channels = in_dim
